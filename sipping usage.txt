@@ -1,0 +1,83 @@
+$ python sipping.py -d sip.test.info -p 5060 -i 192.168.1.196 -c 3 10.10.10.148
+
+The above command sends OPTIONS pings to 10.10.10.148 for 3 times on port 5060 coming from this PC's local IP 192.168.1.196
+
+  -x [X]       Print raw transmitted packets
+  -X [X]       Print raw received responses
+  -u userid    User part of the From header (default sipping)
+  -d domain    Domain part of the From header (needed if your device filters based on domain);e.g., sip.test.info
+  -p port      Destination port (default 5060)
+  -i ip        IP to send in the Via header (will TRY to get local IP by default);e.g., 192.168.1.196
+
+  Use -h for help
+
+-------------
+Sample output
+-------------
+
+NOTE: The -X and -x produces a verbose output. You can choose not to include them for shorter output.
+
+  % python sipping.py -d sip.test.info -p 5060 -i 192.168.1.196 -c 3 10.10.10.148
+  /Users/user/Library/sip-test/sipping/sipping.py:31: DeprecationWarning: 'cgi' is deprecated and slated for removal in Python 3.13
+    import cgi
+  /Users/user/Library/sip-test/sipping/sipping.py:32: DeprecationWarning: 'cgitb' is deprecated and slated for removal in Python 3.13
+    import cgitb
+  Press Ctrl+C to abort
+  > (16/05/23 04:32:02:471788) Sending to 10.10.10.148:5060 [id: 1604476164]
+  < (16/05/23 04:32:02:538201) Reply from 10.10.10.148 (66.3ms): b'SIP/2.0 502 routing policy has no algorithms\r'
+  > (16/05/23 04:32:03:544326) Sending to 10.10.10.148:5060 [id: 6580234372]
+  < (16/05/23 04:32:03:608550) Reply from 10.10.10.148 (63.82ms): b'SIP/2.0 502 routing policy has no algorithms\r'
+  > (16/05/23 04:32:04:614778) Sending to 10.10.10.148:5060 [id: 3354177193]
+  < (16/05/23 04:32:04:686479) Reply from 10.10.10.148 (70.47ms): b'SIP/2.0 502 routing policy has no algorithms\r'
+
+** Verbose output **
+
+  $ python sipping.py -X -x -d sip.test.info -p 5060 -i 192.168.1.196 -c 3  10.10.10.148
+
+  /Users/user/Library/sip-test/sipping/sipping.py:31: DeprecationWarning: 'cgi' is deprecated and slated for removal in Python 3.13
+    import cgi
+  /Users/user/Library/sip-test/sipping/sipping.py:32: DeprecationWarning: 'cgitb' is deprecated and slated for removal in Python 3.13
+    import cgitb
+  Press Ctrl+C to abort
+
+  > (16/05/23 04:19:27:777844) Sending to 10.10.10.148:5060 [id: 0067478388]
+  OPTIONS sip:sip.test.info SIP/2.0
+  Via: SIP/2.0/UDP 192.168.1.196:62123;branch=z9hG4bK3484969450
+  To: "SIP Ping"<sip:sipping@sip.test.info>
+  From: "SIP Ping"<sip:sipping@sip.test.info>
+  Call-ID: 0067478388
+  CSeq: 1 OPTIONS
+  Max-forwards: 70
+  X-redundancy: Request
+  Content-Length: 0
+
+  < (16/05/23 04:19:27:838753) Reply from 10.10.10.148 (60.78ms): b'SIP/2.0 502 routing policy has no algorithms\r'
+  b'SIP/2.0 502 routing policy has no algorithms\r\nVia: SIP/2.0/UDP 192.168.1.196:62123;branch=z9hG4bK3484969450\r\nTo: "SIP Ping" <sip:sipping@sip.test.info>;tag=ds1efbb3fb\r\nFrom: "SIP Ping" <sip:sipping@sip.test.info>\r\nCall-ID: 0067478388\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n'
+
+  > (16/05/23 04:19:28:841115) Sending to 10.10.10.148:5060 [id: 0220476404]
+  OPTIONS sip:sip.test.info SIP/2.0
+  Via: SIP/2.0/UDP 192.168.1.196:59889;branch=z9hG4bK8774551502
+  To: "SIP Ping"<sip:sipping@sip.test.info>
+  From: "SIP Ping"<sip:sipping@sip.test.info>
+  Call-ID: 0220476404
+  CSeq: 1 OPTIONS
+  Max-forwards: 70
+  X-redundancy: Request
+  Content-Length: 0
+
+  < (16/05/23 04:19:28:917460) Reply from 10.10.10.148 (75.65ms): b'SIP/2.0 502 routing policy has no algorithms\r'
+  b'SIP/2.0 502 routing policy has no algorithms\r\nVia: SIP/2.0/UDP 192.168.1.196:59889;branch=z9hG4bK8774551502\r\nTo: "SIP Ping" <sip:sipping@sip.test.info>;tag=dse374b833\r\nFrom: "SIP Ping" <sip:sipping@sip.test.info>\r\nCall-ID: 0220476404\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n'
+
+  > (16/05/23 04:19:29:921501) Sending to 10.10.10.148:5060 [id: 5259869721]
+  OPTIONS sip:sip.test.info SIP/2.0
+  Via: SIP/2.0/UDP 192.168.1.196:58403;branch=z9hG4bK7993028468
+  To: "SIP Ping"<sip:sipping@sip.test.info>
+  From: "SIP Ping"<sip:sipping@sip.test.info>
+  Call-ID: 5259869721
+  CSeq: 1 OPTIONS
+  Max-forwards: 70
+  X-redundancy: Request
+  Content-Length: 0
+
+  < (16/05/23 04:19:29:980508) Reply from 10.10.10.148 (58.76ms): b'SIP/2.0 502 routing policy has no algorithms\r'
+  b'SIP/2.0 502 routing policy has no algorithms\r\nVia: SIP/2.0/UDP 192.168.1.196:58403;branch=z9hG4bK7993028468\r\nTo: "SIP Ping" <sip:sipping@sip.test.info>;tag=ds3eb9bc5a\r\nFrom: "SIP Ping" <sip:sipping@sip.test.info>\r\nCall-ID: 5259869721\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n'
