@@ -3,7 +3,7 @@
 SIP Ping - A diagnostic utility for critical VoIP monitoring
 Created by Daniel Thompson
 Modified by Vlad Markov
-Version 1.1
+Version 2.0
 ==========================================================================
 
 Software License:
@@ -32,13 +32,23 @@ import cgitb
 import sys
 import os
 import socket
+import ssl
 import json
 import urllib.request, urllib.parse, urllib.error
 import signal
 import argparse
+import logging
 from datetime import datetime
 import time
 
+# Configure logging for SSL debug output
+logging.basicConfig(level=logging.CRITICAL)  # Default to suppressing debug output
+
+# Override the ssl.match_hostname function for custom hostname verification
+ssl.match_hostname = lambda cert, hostname: hostname == cert['subjectAltName'][0][1]
+
+# Handler for ctrl+c / SIGINT
+# Last action before quitting is to write a \n to the end of the output file
 def signal_handler(signal, frame):
     print('\nCtrl+C - exiting.')
     if v_logpath != "*":
@@ -49,8 +59,8 @@ def signal_handler(signal, frame):
     sys.exit(0)
 
 def printstats():
-    # loss stats
-    print(("\t[Recd: {recd} | Lost: {lost}]".format(recd=v_recd,lost=v_lost)), end=' ')
+    # Loss stats
+    print(("\t[Recd: {recd} | Lost: {lost}]".format(recd=v_recd, lost=v_lost)), end=' ')
 
     if v_longest_run > 0:
         print(("\t[loss stats:"), end=' ')
@@ -59,26 +69,26 @@ def printstats():
         print((" length of last run: " + str(v_last_run_loss)), end=' ')
     if v_current_run_loss > 0:
         print((" length of current run: " + str(v_current_run_loss)), end=' ')
-    print ("]")
+    print("]")
 
-    # min max avg
-    v_total = 0;
+    # Min, max, avg
+    v_total = 0
     for i in l_history:
         v_total = v_total + i
     if v_total > 0:
         v_avg = v_total / len(l_history)
     else:
         v_avg = 0
-    print(("\t[min/max/avg {min}/{max}/{avg}]".format(min=v_min,max=v_max,avg=v_avg)))
+    print(("\t[min/max/avg {min}/{max}/{avg}]".format(min=v_min, max=v_max, avg=v_avg)))
 
-# create and execute command line parser
+# Create and execute command line parser
 parser = argparse.ArgumentParser(description="Send SIP OPTIONS messages to a host and measure response time. Results are logged continuously to CSV.")
 parser.add_argument("host", help="Target SIP device to ping")
 parser.add_argument("-I", metavar="interval", default=1000, help="Interval in milliseconds between pings (default 1000)")
 parser.add_argument("-u", metavar="userid", default="sipping", help="User part of the From header (default sipping)")
 parser.add_argument("-i", metavar="ip", default="*", help="IP to send in the Via header (will TRY to get local IP by default)")
 parser.add_argument("-d", metavar="domain", default="gekk.info", help="Domain part of the From header (needed if your device filters based on domain)")
-parser.add_argument("-p", metavar="port", default=5060, help="Destination port (default 5060)")
+parser.add_argument("-p", metavar="port", default=5060, help="Destination port (default 5060 for UDP, 5061 for TLS)")
 parser.add_argument("--ttl", metavar="ttl", default=70, help="Value to use for the Max-Forwards field (default 70)")
 parser.add_argument("-w", metavar="file", default="[[default]]", help="File to write results to. (default sipping-logs/[ip] - * to disable.")
 parser.add_argument("-t", metavar="timeout", default="1000", help="Time (ms) to wait for response (default 1000)")
@@ -88,17 +98,33 @@ parser.add_argument("-X", nargs="?", default=False, help="Print raw received res
 parser.add_argument("-q", nargs="?", default=True, help="Do not print status messages (-x and -X ignore this)")
 parser.add_argument("-S", nargs="?", default=True, help="Do not print loss statistics")
 parser.add_argument("-B", metavar="bind_port", default=0, help="Outbound port to bind for sending packets (default is any available port)")
+parser.add_argument("--proto", metavar="protocol", choices=["udp", "tls"], default="udp", help="Protocol to use for sending packets (default is udp)")
+parser.add_argument("--ssl-debug", action="store_true", help="Enable SSL debug output")
+parser.add_argument("--cafile", metavar="cafile", help="Path to CA certificate file for server verification")
+parser.add_argument("--cert", metavar="cert_file", help="Path to client certificate file")
+parser.add_argument("--key", metavar="key_file", help="Path to client private key file")
 args = vars(parser.parse_args())
 
-# populate data from commandline
+# Enable SSL debug output if requested
+if args["ssl_debug"]:
+    logging.getLogger("ssl").setLevel(logging.DEBUG)
+
+# Populate data from command line
 v_interval = int(args["I"])
 v_fromip = args["i"]
 v_sbc = args["host"]
 v_bind_port = int(args["B"])
+v_protocol = args["proto"]
+cafile = args["cafile"]
+cert_file = args["cert"]
+key_file = args["key"]
+# Did the user enter an IP?
 if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", v_sbc) is None:
+    # The user entered a hostname; resolve it
     try:
-        v_sbc = socket.getaddrinfo(v_sbc, 5060)[0][4][0]
+        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol == "udp" else 5061)[0][4][0]
     except Exception as error:
+        # DNS failure or no response
         print(error.strerror)
         sys.exit(1)
 
@@ -120,9 +146,10 @@ if args["w"] == "[[default]]":
 else:
     v_logpath = args["w"]
 
-# if log output is enabled, ensure CSV has header
+# If log output is enabled, ensure CSV has header
 if v_logpath != "*":
     if not os.path.isfile(v_logpath):
+        # Create new CSV file and write header
         f_log = open(v_logpath, "w")
         f_log.write("time,timestamp,host,latency,callid,response")
         f_log.close()
@@ -131,15 +158,18 @@ def generate_nonce(length=8):
     """Generate pseudorandom number for call IDs."""
     return ''.join([str(random.randint(0, 9)) for i in range(length)])
 
+# Writes onscreen timestamps in a consistent format
 def timef(timev=None):
     if timev == None:
         return datetime.now().strftime("%d/%m/%y %I:%M:%S:%f")
     else:
         return datetime.fromtimestamp(timev)
 
+# Register signal handler for ctrl+c since we're ready to start
 signal.signal(signal.SIGINT, signal_handler)
 if not v_quiet: print("Press Ctrl+C to abort")
 
+# Zero out statistics variables
 v_recd = 0
 v_lost = 0
 v_longest_run = 0
@@ -151,26 +181,46 @@ v_min = float("inf")
 v_max = float("-inf")
 v_iter = 0
 
+# Empty list of last 5 pings
 l_current_results = []
 
+# Start the ping loop
 while v_count > 0:
     v_count -= 1
-    skt_sbc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    skt_sbc.bind(("0.0.0.0", v_bind_port))
-    skt_sbc.settimeout(v_timeout / 1000.0)
-    v_localport = skt_sbc.getsockname()[1]
+    # Create a socket
+    if v_protocol == "udp":
+        skt_sbc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        skt_sbc.bind(("0.0.0.0", v_bind_port))  # Bind to specified outbound port
+        skt_sbc.settimeout(v_timeout / 1000.0)
+    elif v_protocol == "tls":
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        if cafile:
+            context.load_verify_locations(cafile=cafile)
+        if cert_file and key_file:
+            context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        skt_sbc = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=v_sbc)
+        skt_sbc.settimeout(v_timeout / 1000.0)
+        skt_sbc.connect((v_sbc, v_port))
+    
+    # Use the bind port directly for the Via header
+    v_localport = v_bind_port
+    # Find out what IP we're sourcing from to populate the Via
     if v_fromip != "*":
         v_lanip = v_fromip
     else:
         v_lanip = socket.gethostbyname(socket.gethostname())
 
+    # Latency is calculated from this timestamp
     start = time.time()
 
+    # Create a random callid so we can identify the message in a packet capture
     v_callid = generate_nonce(length=10)
+
     v_branch = generate_nonce(length=10)
 
+    # Write the OPTIONS packet
     v_register_one = """OPTIONS sip:{domain} SIP/2.0
-Via: SIP/2.0/UDP {lanip}:{localport};branch=z9hG4bK{branch}
+Via: SIP/2.0/{proto} {lanip}:{localport};branch=z9hG4bK{branch}
 To: "SIP Ping"<sip:{userid}@{domain}>
 From: "SIP Ping"<sip:{userid}@{domain}>
 Call-ID: {callid}
@@ -179,30 +229,48 @@ Max-forwards: {ttl}
 X-redundancy: Request
 Content-Length: 0
 
-""".format(domain=v_domain, lanip=v_lanip, userid=v_userid, localport=v_localport, callid=v_callid, ttl=v_ttl, branch=v_branch)
+""".format(domain=v_domain, lanip=v_lanip, localport=v_localport, branch=v_branch, userid=v_userid, callid=v_callid, ttl=v_ttl, proto=v_protocol.upper())
 
-    if not v_quiet: print(("> ({time}) Sending to {host}:{port} [id: {id}]".format(host=v_sbc,port=v_port, time=timef(), id=v_callid)))
+    # Print transmit announcement
+    if not v_quiet: print(("> ({time}) Sending to {host}:{port} [id: {id}]".format(host=v_sbc, port=v_port, time=timef(), id=v_callid)))
 
+    # If -x was passed, print the transmitted packet
     if v_rawsend:
         print(v_register_one)
 
-    skt_sbc.sendto(v_register_one.encode('utf-8'), (v_sbc, v_port))
+    # Send the packet
+    if v_protocol == "udp":
+        skt_sbc.sendto(v_register_one.encode('utf-8'), (v_sbc, v_port))
+    elif v_protocol == "tls":
+        skt_sbc.send(v_register_one.encode('utf-8'))
 
     start = time.time()
+    # Wait for response
     try:
-        data, addr = skt_sbc.recvfrom(1024)
+        # Start a synchronous receive
+        if v_protocol == "udp":
+            data, addr = skt_sbc.recvfrom(1024)  # Buffer size is 1024 bytes
+        elif v_protocol == "tls":
+            data = skt_sbc.recv(1024)
+
+        # Latency is calculated against this time
         end = time.time()
         diff = float("%.2f" % ((end - start) * 1000.0))
 
+        # Pick out the first line in order to get the SIP response code
         v_response = data.split("\n".encode('utf-8'))[0]
 
-        if not v_quiet: print(("< ({time}) Reply from {host} ({diff}ms): {response}".format(host=addr[0], diff=diff, time=timef(), response=v_response)))
+        # Print success message and response code
+        if not v_quiet: print(("< ({time}) Reply from {host} ({diff}ms): {response}".format(host=addr[0] if v_protocol == "udp" else v_sbc, diff=diff, time=timef(), response=v_response)))
 
+        # If -X was passed, print the received packet
         if v_rawrecv:
             print(data)
 
-        l_current_results.append("{time},{timestamp},{host},{diff},{id},{response}".format(host=addr[0], diff=diff, time=timef(), timestamp=time.time(), id=v_callid, response=v_response))
+        # Log success
+        l_current_results.append("{time},{timestamp},{host},{diff},{id},{response}".format(host=addr[0] if v_protocol == "udp" else v_sbc, diff=diff, time=timef(), timestamp=time.time(), id=v_callid, response=v_response))
 
+        # Update statistics
         l_history.append(diff)
         if len(l_history) > 200:
             l_history = l_history[1:]
@@ -217,17 +285,23 @@ Content-Length: 0
                 v_longest_run = v_last_run_loss
             v_current_run_loss = 0
     except socket.timeout:
+        # Timed out; print a drop
         if not v_quiet: print(("X ({time}) Timed out waiting for response from {host}".format(host=v_sbc, time=timef())))
+        # Log a drop
         l_current_results.append("{time},{timestamp},{host},drop,{id},drop".format(host=v_sbc, time=timef(), timestamp=time.time(), id=v_callid))
 
+        # Increment statistics
         v_lost += 1
         v_current_run_loss += 1
 
     v_iter += 1
+    # If it's been five packets, print stats and write logfile
     if v_iter > 4:
+        # Print stats to screen
         if not v_nostats:
             printstats()
 
+        # If logging is enabled, append stats to logfile
         if v_logpath != "*":
             f_log = open(v_logpath, "a")
             f_log.write("\n" + ("\n".join(l_current_results)))
@@ -236,5 +310,6 @@ Content-Length: 0
 
         v_iter = 0
 
+    # Pause for user-requested interval before sending next packet
     if v_count > 0: time.sleep(v_interval / 1000.0)
 if v_lost > 0: exit(1)
