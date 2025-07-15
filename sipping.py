@@ -82,7 +82,7 @@ def printstats():
     print(("\t[min/max/avg {min}/{max}/{avg}]".format(min=v_min, max=v_max, avg=v_avg)))
 
 # Create and execute command line parser
-parser = argparse.ArgumentParser(description="Send SIP OPTIONS messages to a host and measure response time. Results are logged continuously to CSV.")
+parser = argparse.ArgumentParser(description="Send SIP messages to a host and measure response time. Results are logged continuously to CSV.")
 parser.add_argument("host", help="Target SIP device to ping")
 parser.add_argument("-I", metavar="interval", default=1000, help="Interval in milliseconds between pings (default 1000)")
 parser.add_argument("-u", metavar="userid", default="sipping", help="User part of the From header (default sipping)")
@@ -103,6 +103,11 @@ parser.add_argument("--ssl-debug", action="store_true", help="Enable SSL debug o
 parser.add_argument("--cafile", metavar="cafile", help="Path to CA certificate file for server verification")
 parser.add_argument("--cert", metavar="cert_file", help="Path to client certificate file")
 parser.add_argument("--key", metavar="key_file", help="Path to client private key file")
+parser.add_argument("--method", metavar="method", choices=["OPTIONS", "INFO"], default="OPTIONS", help="SIP method to use (default is OPTIONS)")
+parser.add_argument("--dest-userid", metavar="dest_userid", default=None, help="User part of the request URI and To field (optional)")
+parser.add_argument("--user-agent", metavar="user_agent", default=None, help="User-Agent header value (optional)")
+parser.add_argument("--use-ip", action="store_true", help="Use destination IP and port instead of domain")
+parser.add_argument("--contact", metavar="contact", nargs="?", const="", help="Contact header value (optional, defaults to From field)")
 args = vars(parser.parse_args())
 
 # Enable SSL debug output if requested
@@ -118,6 +123,11 @@ v_protocol = args["proto"]
 cafile = args["cafile"]
 cert_file = args["cert"]
 key_file = args["key"]
+sip_method = args["method"]
+dest_userid = args["dest_userid"] if args["dest_userid"] else args["u"]
+user_agent = args["user_agent"]
+use_ip = args["use_ip"]
+contact = args["contact"]
 # Did the user enter an IP?
 if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", v_sbc) is None:
     # The user entered a hostname; resolve it
@@ -203,8 +213,8 @@ while v_count > 0:
         skt_sbc.connect((v_sbc, v_port))
     
     # Use the bind port directly for the Via header
-    v_localport = v_bind_port
-    # Find out what IP we're sourcing from to populate the Via
+    v_localport = skt_sbc.getsockname()[1]
+    # Find out what IP we're sourcing from to populate the Via and From
     if v_fromip != "*":
         v_lanip = v_fromip
     else:
@@ -217,22 +227,35 @@ while v_count > 0:
     v_callid = generate_nonce(length=10)
 
     v_branch = generate_nonce(length=10)
+    v_tag = "z9hG4" + generate_nonce(length=10)
 
-    # Write the OPTIONS packet
-    v_register_one = """OPTIONS sip:{domain} SIP/2.0
+    # Determine Request URI with port if missing
+    domain_or_ip = v_sbc if use_ip else v_domain
+    request_uri = "{dest_userid}@{domain_or_ip}:{port}".format(dest_userid=dest_userid, domain_or_ip=domain_or_ip, port=v_port)
+
+    # Construct the From field
+    from_field = "From: \"SIP Ping\"<sip:{userid}@{lanip}:{localport}>;tag={tag}".format(userid=v_userid, lanip=v_lanip, localport=v_localport, tag=v_tag)
+
+    # Determine Contact field
+    contact_value = contact if contact else "<sip:{userid}@{lanip}:{localport}>".format(userid=v_userid, lanip=v_lanip, localport=v_localport)
+    contact_header = "Contact: {}\n".format(contact_value)
+
+    # Write the SIP packet with specified method
+    content_type = "Content-Type: text/plain\n" if sip_method == "INFO" else ""
+    user_agent_header = "User-Agent: {}\n".format(user_agent) if user_agent else ""
+    v_register_one = """{method} sip:{request_uri} SIP/2.0
 Via: SIP/2.0/{proto} {lanip}:{localport};branch=z9hG4bK{branch}
-To: "SIP Ping"<sip:{userid}@{domain}>
-From: "SIP Ping"<sip:{userid}@{domain}>
+To: "SIP Ping"<sip:{dest_userid}@{domain_or_ip}:{port}>
+{from_field}
 Call-ID: {callid}
-CSeq: 1 OPTIONS
+CSeq: 1 {method}
 Max-forwards: {ttl}
-X-redundancy: Request
-Content-Length: 0
+{user_agent_header}{contact_header}{content_type}Content-Length: 0
 
-""".format(domain=v_domain, lanip=v_lanip, localport=v_localport, branch=v_branch, userid=v_userid, callid=v_callid, ttl=v_ttl, proto=v_protocol.upper())
+""".format(method=sip_method, request_uri=request_uri, dest_userid=dest_userid, domain_or_ip=domain_or_ip, port=v_port, lanip=v_lanip, localport=v_localport, branch=v_branch, userid=v_userid, callid=v_callid, ttl=v_ttl, proto=v_protocol.upper(), content_type=content_type, user_agent_header=user_agent_header, contact_header=contact_header, from_field=from_field)
 
     # Print transmit announcement
-    if not v_quiet: print(("> ({time}) Sending to {host}:{port} [id: {id}]".format(host=v_sbc, port=v_port, time=timef(), id=v_callid)))
+    if not v_quiet: print(("> ({time}) Sending {method} to {host}:{port} [id: {id}]".format(method=sip_method, host=v_sbc, port=v_port, time=timef(), id=v_callid)))
 
     # If -x was passed, print the transmitted packet
     if v_rawsend:
