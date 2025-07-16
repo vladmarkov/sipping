@@ -3,7 +3,7 @@
 SIP Ping - A diagnostic utility for critical VoIP monitoring
 Created by Daniel Thompson
 Modified by Vlad Markov
-Version 2.0
+Version 2.1
 ==========================================================================
 
 Software License:
@@ -132,10 +132,10 @@ contact = args["contact"]
 if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", v_sbc) is None:
     # The user entered a hostname; resolve it
     try:
-        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol == "udp" else 5061)[0][4][0]
+        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol == "udp" else 5061, proto=socket.SOL_TCP if v_protocol == "tls" else socket.SOL_UDP)[0][4][0]
     except Exception as error:
-        # DNS failure or no response
-        print(error.strerror)
+        # DNS resolution failure
+        print("DNS resolution error:", error)
         sys.exit(1)
 
 v_userid = args["u"]
@@ -170,7 +170,7 @@ def generate_nonce(length=8):
 
 # Writes onscreen timestamps in a consistent format
 def timef(timev=None):
-    if timev == None:
+    if timev is None:
         return datetime.now().strftime("%d/%m/%y %I:%M:%S:%f")
     else:
         return datetime.fromtimestamp(timev)
@@ -210,8 +210,19 @@ while v_count > 0:
             context.load_cert_chain(certfile=cert_file, keyfile=key_file)
         skt_sbc = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=v_sbc)
         skt_sbc.settimeout(v_timeout / 1000.0)
-        skt_sbc.connect((v_sbc, v_port))
-    
+
+        # Attempt to connect with timeout handling
+        try:
+            skt_sbc.connect((v_sbc, v_port))
+        except socket.timeout:
+            print(f"Connection to {v_sbc}:{v_port} timed out.")
+            v_lost += 1
+            continue
+        except Exception as e:
+            print(f"Error connecting to {v_sbc}:{v_port}: {e}")
+            v_lost += 1
+            continue
+
     # Use the bind port directly for the Via header
     v_localport = skt_sbc.getsockname()[1]
     # Find out what IP we're sourcing from to populate the Via and From
@@ -326,13 +337,14 @@ Max-forwards: {ttl}
 
         # If logging is enabled, append stats to logfile
         if v_logpath != "*":
-            f_log = open(v_logpath, "a")
-            f_log.write("\n" + ("\n".join(l_current_results)))
-            f_log.close()
+            with open(v_logpath, "a") as f_log:
+                f_log.write("\n" + ("\n".join(l_current_results)))
         l_current_results = []
 
         v_iter = 0
 
     # Pause for user-requested interval before sending next packet
     if v_count > 0: time.sleep(v_interval / 1000.0)
-if v_lost > 0: exit(1)
+
+if v_lost > 0:
+    sys.exit(1)
