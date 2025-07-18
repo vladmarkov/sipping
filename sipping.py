@@ -3,7 +3,7 @@
 SIP Ping - A diagnostic utility for critical VoIP monitoring
 Created by Daniel Thompson
 Modified by Vlad Markov
-Version 2.1
+Version 2.5
 ==========================================================================
 
 Software License:
@@ -48,20 +48,17 @@ logging.basicConfig(level=logging.CRITICAL)  # Default to suppressing debug outp
 ssl.match_hostname = lambda cert, hostname: hostname == cert['subjectAltName'][0][1]
 
 # Handler for ctrl+c / SIGINT
-# Last action before quitting is to write a \n to the end of the output file
 def signal_handler(signal, frame):
     print('\nCtrl+C - exiting.')
     if v_logpath != "*":
-        f_log = open(v_logpath, "a")
-        f_log.write('\n')
-        f_log.close()
+        with open(v_logpath, "a") as f_log:
+            f_log.write('\n')
     printstats()
     sys.exit(0)
 
 def printstats():
     # Loss stats
     print(("\t[Recd: {recd} | Lost: {lost}]".format(recd=v_recd, lost=v_lost)), end=' ')
-
     if v_longest_run > 0:
         print(("\t[loss stats:"), end=' ')
         print(("longest run: " + str(v_longest_run)), end=' ')
@@ -72,13 +69,8 @@ def printstats():
     print("]")
 
     # Min, max, avg
-    v_total = 0
-    for i in l_history:
-        v_total = v_total + i
-    if v_total > 0:
-        v_avg = v_total / len(l_history)
-    else:
-        v_avg = 0
+    v_total = sum(l_history)
+    v_avg = v_total / len(l_history) if v_total > 0 else 0
     print(("\t[min/max/avg {min}/{max}/{avg}]".format(min=v_min, max=v_max, avg=v_avg)))
 
 # Create and execute command line parser
@@ -98,7 +90,7 @@ parser.add_argument("-X", nargs="?", default=False, help="Print raw received res
 parser.add_argument("-q", nargs="?", default=True, help="Do not print status messages (-x and -X ignore this)")
 parser.add_argument("-S", nargs="?", default=True, help="Do not print loss statistics")
 parser.add_argument("-B", metavar="bind_port", default=0, help="Outbound port to bind for sending packets (default is any available port)")
-parser.add_argument("--proto", metavar="protocol", choices=["udp", "tls"], default="udp", help="Protocol to use for sending packets (default is udp)")
+parser.add_argument("--proto", metavar="protocol", choices=["udp", "tcp", "tls"], default="udp", help="Protocol to use for sending packets (default is udp)")
 parser.add_argument("--ssl-debug", action="store_true", help="Enable SSL debug output")
 parser.add_argument("--cafile", metavar="cafile", help="Path to CA certificate file for server verification")
 parser.add_argument("--cert", metavar="cert_file", help="Path to client certificate file")
@@ -132,7 +124,7 @@ contact = args["contact"]
 if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", v_sbc) is None:
     # The user entered a hostname; resolve it
     try:
-        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol == "udp" else 5061, proto=socket.SOL_TCP if v_protocol == "tls" else socket.SOL_UDP)[0][4][0]
+        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol == "udp" else 5061, proto=socket.SOL_TCP if v_protocol in ["tcp", "tls"] else socket.SOL_UDP)[0][4][0]
     except Exception as error:
         # DNS resolution failure
         print("DNS resolution error:", error)
@@ -160,9 +152,8 @@ else:
 if v_logpath != "*":
     if not os.path.isfile(v_logpath):
         # Create new CSV file and write header
-        f_log = open(v_logpath, "w")
-        f_log.write("time,timestamp,host,latency,callid,response")
-        f_log.close()
+        with open(v_logpath, "w") as f_log:
+            f_log.write("time,timestamp,host,latency,callid,response")
 
 def generate_nonce(length=8):
     """Generate pseudorandom number for call IDs."""
@@ -198,30 +189,40 @@ l_current_results = []
 while v_count > 0:
     v_count -= 1
     # Create a socket
-    if v_protocol == "udp":
-        skt_sbc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        skt_sbc.bind(("0.0.0.0", v_bind_port))  # Bind to specified outbound port
-        skt_sbc.settimeout(v_timeout / 1000.0)
-    elif v_protocol == "tls":
-        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        if cafile:
-            context.load_verify_locations(cafile=cafile)
-        if cert_file and key_file:
-            context.load_cert_chain(certfile=cert_file, keyfile=key_file)
-        skt_sbc = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=v_sbc)
-        skt_sbc.settimeout(v_timeout / 1000.0)
-
-        # Attempt to connect with timeout handling
-        try:
+    try:
+        if v_protocol == "udp":
+            skt_sbc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            skt_sbc.bind(("0.0.0.0", v_bind_port))  # Bind to specified outbound port
+            skt_sbc.settimeout(v_timeout / 1000.0)
+        elif v_protocol == "tcp":
+            skt_sbc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            skt_sbc.settimeout(v_timeout / 1000.0)
+            skt_sbc.bind(("0.0.0.0", v_bind_port))
             skt_sbc.connect((v_sbc, v_port))
-        except socket.timeout:
-            print(f"Connection to {v_sbc}:{v_port} timed out.")
-            v_lost += 1
-            continue
-        except Exception as e:
-            print(f"Error connecting to {v_sbc}:{v_port}: {e}")
-            v_lost += 1
-            continue
+        elif v_protocol == "tls":
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            if cafile:
+                context.load_verify_locations(cafile=cafile)
+            if cert_file and key_file:
+                context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            skt_sbc = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=v_sbc)
+            skt_sbc.settimeout(v_timeout / 1000.0)
+            skt_sbc.connect((v_sbc, v_port))
+    except socket.timeout:
+        print(f"Connection to {v_sbc}:{v_port} timed out.")
+        v_lost += 1
+        continue
+    except OSError as e:
+        if e.errno == 98:
+            print(f"Address {v_bind_port} already in use.")
+        else:
+            print(f"OS error: {e}")
+        v_lost += 1
+        continue
+    except Exception as e:
+        print(f"Error connecting to {v_sbc}:{v_port}: {e}")
+        v_lost += 1
+        continue
 
     # Use the bind port directly for the Via header
     v_localport = skt_sbc.getsockname()[1]
@@ -273,10 +274,15 @@ Max-forwards: {ttl}
         print(v_register_one)
 
     # Send the packet
-    if v_protocol == "udp":
-        skt_sbc.sendto(v_register_one.encode('utf-8'), (v_sbc, v_port))
-    elif v_protocol == "tls":
-        skt_sbc.send(v_register_one.encode('utf-8'))
+    try:
+        if v_protocol == "udp":
+            skt_sbc.sendto(v_register_one.encode('utf-8'), (v_sbc, v_port))
+        else:  # For both TCP and TLS
+            skt_sbc.send(v_register_one.encode('utf-8'))
+    except Exception as e:
+        print(f"Error sending data to {v_sbc}:{v_port}: {e}")
+        v_lost += 1
+        continue
 
     start = time.time()
     # Wait for response
@@ -284,7 +290,7 @@ Max-forwards: {ttl}
         # Start a synchronous receive
         if v_protocol == "udp":
             data, addr = skt_sbc.recvfrom(1024)  # Buffer size is 1024 bytes
-        elif v_protocol == "tls":
+        else:
             data = skt_sbc.recv(1024)
 
         # Latency is calculated against this time
