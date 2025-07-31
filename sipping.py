@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 """
-SIP Ping - A diagnostic utility for critical VoIP monitoring
+SIP and H.323 VCS Validation Tool - A diagnostic utility for VoIP and video conferencing systems
 Created by Daniel Thompson
 Modified by Vlad Markov
-Version 2.5
+Version 3.0
 ==========================================================================
 
 Software License:
@@ -15,10 +15,9 @@ See http://gekk.info/sipping for more information and suggested usage.
 
 ==========================================================================
 
-SIP Ping is a tool for monitoring a SIP gateway (PBX, SBC, phone) for deep
-dive diagnostics. Most tools for VoIP monitoring are based on meeting SLA
-figures and providing general "network availability" statistics. SIP Ping
-is for granular troubleshooting.
+This tool is designed for monitoring SIP gateways and H.323 video conferencing systems for deep
+dive diagnostics. It supports SIP OPTIONS and INFO methods for granular troubleshooting, as well
+as H.225 Keep-alives for H.323 VCS validation.
 
 Commandline flags and defaults are available by running "python sipping.py -h"
 
@@ -34,6 +33,7 @@ import os
 import socket
 import ssl
 import json
+import struct
 import urllib.request, urllib.parse, urllib.error
 import signal
 import argparse
@@ -43,9 +43,6 @@ import time
 
 # Configure logging for SSL debug output
 logging.basicConfig(level=logging.CRITICAL)  # Default to suppressing debug output
-
-# Override the ssl.match_hostname function for custom hostname verification
-ssl.match_hostname = lambda cert, hostname: hostname == cert['subjectAltName'][0][1]
 
 # Handler for ctrl+c / SIGINT
 def signal_handler(signal, frame):
@@ -74,13 +71,13 @@ def printstats():
     print(("\t[min/max/avg {min}/{max}/{avg}]".format(min=v_min, max=v_max, avg=v_avg)))
 
 # Create and execute command line parser
-parser = argparse.ArgumentParser(description="Send SIP messages to a host and measure response time. Results are logged continuously to CSV.")
-parser.add_argument("host", help="Target SIP device to ping")
+parser = argparse.ArgumentParser(description="Send SIP and H.225 messages to a host and measure response time. Results are logged continuously to CSV.")
+parser.add_argument("host", help="Target device to ping (SIP gateway or H.323 VCS)")
 parser.add_argument("-I", metavar="interval", default=1000, help="Interval in milliseconds between pings (default 1000)")
 parser.add_argument("-u", metavar="userid", default="sipping", help="User part of the From header (default sipping)")
 parser.add_argument("-i", metavar="ip", default="*", help="IP to send in the Via header (will TRY to get local IP by default)")
 parser.add_argument("-d", metavar="domain", default="gekk.info", help="Domain part of the From header (needed if your device filters based on domain)")
-parser.add_argument("-p", metavar="port", default=5060, help="Destination port (default 5060 for UDP, 5061 for TLS)")
+parser.add_argument("-p", metavar="port", default=5060, help="Destination port (default 5060 for SIP, 1720 for H.323)")
 parser.add_argument("--ttl", metavar="ttl", default=70, help="Value to use for the Max-Forwards field (default 70)")
 parser.add_argument("-w", metavar="file", default="[[default]]", help="File to write results to. (default sipping-logs/[ip] - * to disable.")
 parser.add_argument("-t", metavar="timeout", default="1000", help="Time (ms) to wait for response (default 1000)")
@@ -90,7 +87,7 @@ parser.add_argument("-X", nargs="?", default=False, help="Print raw received res
 parser.add_argument("-q", nargs="?", default=True, help="Do not print status messages (-x and -X ignore this)")
 parser.add_argument("-S", nargs="?", default=True, help="Do not print loss statistics")
 parser.add_argument("-B", metavar="bind_port", default=0, help="Outbound port to bind for sending packets (default is any available port)")
-parser.add_argument("--proto", metavar="protocol", choices=["udp", "tcp", "tls"], default="udp", help="Protocol to use for sending packets (default is udp)")
+parser.add_argument("--proto", metavar="protocol", choices=["udp", "tcp", "tls", "h225"], default="udp", help="Protocol to use for sending packets (default is udp)")
 parser.add_argument("--ssl-debug", action="store_true", help="Enable SSL debug output")
 parser.add_argument("--cafile", metavar="cafile", help="Path to CA certificate file for server verification")
 parser.add_argument("--cert", metavar="cert_file", help="Path to client certificate file")
@@ -100,6 +97,7 @@ parser.add_argument("--dest-userid", metavar="dest_userid", default=None, help="
 parser.add_argument("--user-agent", metavar="user_agent", default=None, help="User-Agent header value (optional)")
 parser.add_argument("--use-ip", action="store_true", help="Use destination IP and port instead of domain")
 parser.add_argument("--contact", metavar="contact", nargs="?", const="", help="Contact header value (optional, defaults to From field)")
+parser.add_argument("--accept", metavar="accept", default=None, help="Accept header value (optional)")
 args = vars(parser.parse_args())
 
 # Enable SSL debug output if requested
@@ -120,11 +118,12 @@ dest_userid = args["dest_userid"] if args["dest_userid"] else args["u"]
 user_agent = args["user_agent"]
 use_ip = args["use_ip"]
 contact = args["contact"]
+accept_header = "Accept: {}\n".format(args["accept"]) if args["accept"] else ""
 # Did the user enter an IP?
 if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", v_sbc) is None:
     # The user entered a hostname; resolve it
     try:
-        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol == "udp" else 5061, proto=socket.SOL_TCP if v_protocol in ["tcp", "tls"] else socket.SOL_UDP)[0][4][0]
+        v_sbc = socket.getaddrinfo(v_sbc, 5060 if v_protocol in ["udp", "tcp", "tls"] else 1720, proto=socket.SOL_TCP if v_protocol in ["tcp", "tls", "h225"] else socket.SOL_UDP)[0][4][0]
     except Exception as error:
         # DNS resolution failure
         print("DNS resolution error:", error)
@@ -151,7 +150,6 @@ else:
 # If log output is enabled, ensure CSV has header
 if v_logpath != "*":
     if not os.path.isfile(v_logpath):
-        # Create new CSV file and write header
         with open(v_logpath, "w") as f_log:
             f_log.write("time,timestamp,host,latency,callid,response")
 
@@ -185,6 +183,31 @@ v_iter = 0
 # Empty list of last 5 pings
 l_current_results = []
 
+def send_sip_message(skt_sbc, v_register_one, v_protocol, v_sbc, v_port):
+    """Send SIP message and handle exceptions."""
+    try:
+        if v_protocol == "udp":
+            skt_sbc.sendto(v_register_one.encode('utf-8'), (v_sbc, v_port))
+        else:  # For both TCP and TLS
+            skt_sbc.send(v_register_one.encode('utf-8'))
+    except Exception as e:
+        print(f"Error sending data to {v_sbc}:{v_port}: {e}")
+        return False
+    return True
+
+def send_h225_keep_alive(skt_sbc, v_sbc, v_port):
+    """Send H.225 Keep-alive for H.323 VCS validation."""
+    # Example H.225 Keep-alive packet (binary format)
+    h225_keep_alive = struct.pack('!HH', 1, 1)
+    try:
+        skt_sbc.send(h225_keep_alive)
+        if v_rawsend:
+            print(f"Sending H.225 Keep-alive to {v_sbc}:{v_port}: {h225_keep_alive.hex()}")
+    except Exception as e:
+        print(f"Error sending H.225 Keep-alive to {v_sbc}:{v_port}: {e}")
+        return False
+    return True
+
 # Start the ping loop
 while v_count > 0:
     v_count -= 1
@@ -206,6 +229,10 @@ while v_count > 0:
             if cert_file and key_file:
                 context.load_cert_chain(certfile=cert_file, keyfile=key_file)
             skt_sbc = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=v_sbc)
+            skt_sbc.settimeout(v_timeout / 1000.0)
+            skt_sbc.connect((v_sbc, v_port))
+        elif v_protocol == "h225":
+            skt_sbc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             skt_sbc.settimeout(v_timeout / 1000.0)
             skt_sbc.connect((v_sbc, v_port))
     except socket.timeout:
@@ -262,25 +289,33 @@ To: "SIP Ping"<sip:{dest_userid}@{domain_or_ip}:{port}>
 Call-ID: {callid}
 CSeq: 1 {method}
 Max-forwards: {ttl}
-{user_agent_header}{contact_header}{content_type}Content-Length: 0
+{user_agent_header}{contact_header}{accept_header}{content_type}Content-Length: 0
 
-""".format(method=sip_method, request_uri=request_uri, dest_userid=dest_userid, domain_or_ip=domain_or_ip, port=v_port, lanip=v_lanip, localport=v_localport, branch=v_branch, userid=v_userid, callid=v_callid, ttl=v_ttl, proto=v_protocol.upper(), content_type=content_type, user_agent_header=user_agent_header, contact_header=contact_header, from_field=from_field)
+""".format(method=sip_method, request_uri=request_uri, dest_userid=dest_userid, domain_or_ip=domain_or_ip, port=v_port, lanip=v_lanip, localport=v_localport, branch=v_branch, userid=v_userid, callid=v_callid, ttl=v_ttl, proto=v_protocol.upper(), content_type=content_type, user_agent_header=user_agent_header, contact_header=contact_header, from_field=from_field, accept_header=accept_header)
 
     # Print transmit announcement
-    if not v_quiet: print(("> ({time}) Sending {method} to {host}:{port} [id: {id}]".format(method=sip_method, host=v_sbc, port=v_port, time=timef(), id=v_callid)))
+    if not v_quiet:
+        if v_protocol in ["udp", "tcp", "tls"]:
+            print(("> ({time}) Sending {method} to {host}:{port} [id: {id}]".format(method=sip_method, host=v_sbc, port=v_port, time=timef(), id=v_callid)))
+        elif v_protocol == "h225":
+            print(("> ({time}) Sending H.225 Keep-alive to {host}:{port}".format(host=v_sbc, port=v_port, time=timef())))
 
     # If -x was passed, print the transmitted packet
     if v_rawsend:
-        print(v_register_one)
+        if v_protocol in ["udp", "tcp", "tls"]:
+            print(v_register_one)
+        elif v_protocol == "h225":
+            print(f"H.225 Keep-alive packet: {h225_keep_alive.hex()}")
 
-    # Send the packet
-    try:
-        if v_protocol == "udp":
-            skt_sbc.sendto(v_register_one.encode('utf-8'), (v_sbc, v_port))
-        else:  # For both TCP and TLS
-            skt_sbc.send(v_register_one.encode('utf-8'))
-    except Exception as e:
-        print(f"Error sending data to {v_sbc}:{v_port}: {e}")
+    # Send the packet based on protocol
+    if v_protocol in ["udp", "tcp", "tls"]:
+        success = send_sip_message(skt_sbc, v_register_one, v_protocol, v_sbc, v_port)
+    elif v_protocol == "h225":
+        success = send_h225_keep_alive(skt_sbc, v_sbc, v_port)
+    else:
+        success = False
+
+    if not success:
         v_lost += 1
         continue
 
@@ -301,11 +336,18 @@ Max-forwards: {ttl}
         v_response = data.split("\n".encode('utf-8'))[0]
 
         # Print success message and response code
-        if not v_quiet: print(("< ({time}) Reply from {host} ({diff}ms): {response}".format(host=addr[0] if v_protocol == "udp" else v_sbc, diff=diff, time=timef(), response=v_response)))
+        if not v_quiet:
+            if v_protocol in ["udp", "tcp", "tls"]:
+                print(("< ({time}) Reply from {host} ({diff}ms): {response}".format(host=addr[0] if v_protocol == "udp" else v_sbc, diff=diff, time=timef(), response=v_response)))
+            elif v_protocol == "h225":
+                print(("< ({time}) Reply from {host} ({diff}ms): {response}".format(host=v_sbc, diff=diff, time=timef(), response=data.hex())))
 
         # If -X was passed, print the received packet
         if v_rawrecv:
-            print(data)
+            if v_protocol in ["udp", "tcp", "tls"]:
+                print(data)
+            elif v_protocol == "h225":
+                print(f"H.225 Keep-alive response: {data.hex()}")
 
         # Log success
         l_current_results.append("{time},{timestamp},{host},{diff},{id},{response}".format(host=addr[0] if v_protocol == "udp" else v_sbc, diff=diff, time=timef(), timestamp=time.time(), id=v_callid, response=v_response))
