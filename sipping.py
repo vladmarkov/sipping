@@ -3,7 +3,7 @@
 SIP and H.323 VCS Validation Tool - A diagnostic utility for VoIP and video conferencing systems
 Created by Daniel Thompson
 Modified by Vlad Markov
-Version 3.0
+Version 3.1
 ==========================================================================
 
 Software License:
@@ -305,6 +305,7 @@ Max-forwards: {ttl}
         if v_protocol in ["udp", "tcp", "tls"]:
             print(v_register_one)
         elif v_protocol == "h225":
+            h225_keep_alive = struct.pack('!HH', 1, 1)  # Ensure packet is defined here for debug output
             print(f"H.225 Keep-alive packet: {h225_keep_alive.hex()}")
 
     # Send the packet based on protocol
