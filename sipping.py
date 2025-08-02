@@ -3,7 +3,7 @@
 SIP and H.323 VCS Validation Tool - A diagnostic utility for VoIP and video conferencing systems
 Created by Daniel Thompson
 Modified by Vlad Markov
-Version 3.1
+Version 3.2
 ==========================================================================
 
 Software License:
@@ -224,6 +224,7 @@ while v_count > 0:
             skt_sbc.connect((v_sbc, v_port))
         elif v_protocol == "tls":
             context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            context.check_hostname = False  # Disable hostname checking
             if cafile:
                 context.load_verify_locations(cafile=cafile)
             if cert_file and key_file:
